@@ -92,10 +92,12 @@ async def run_task(task: Task, api_key: str = Depends(validate_api_key)):
         result = execute_task(task.task)
         logging.info(f"Task execution result: {result}")
         return JSONResponse(status_code=200, content=result) if result["status"] == "success" else JSONResponse(status_code=400, content=result)
+    except FileNotFoundError as fnf_error:
+        logging.error(f"File not found: {fnf_error}")
+        return {"status": "error", "message": "File not found"}
     except Exception as e:
-        error_msg = f"Error executing task: {str(e)}\n{traceback.format_exc()}"
-        logging.error(error_msg)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        logging.error(f"Unexpected error: {str(e)}")
+        return {"status": "error", "message": "An unexpected error occurred"}
 
 def execute_task(command):
     try:
@@ -278,6 +280,9 @@ def execute_task(command):
             
             api_url = command.split("url=")[1].split()[0]
             response = requests.get(api_url)
+            if response.status_code != 200:
+                return {"status": "error", "message": "Failed to fetch data from API"}
+            
             with open(os.path.join(DATA_DIR, "api_data.json"), "w") as f:
                 json.dump(response.json(), f)
             return {"status": "success", "message": "API data fetched"}
@@ -417,12 +422,16 @@ def compute_cosine_similarity(v1, v2):
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
 def security_check(path: str) -> bool:
-    """Ensure path is within /data directory"""
+    """Ensure path is within /data directory."""
     try:
         real_path = os.path.realpath(path)
         data_dir = os.path.realpath(DATA_DIR)
-        return real_path.startswith(data_dir)
-    except:
+        is_safe = real_path.startswith(data_dir)
+        if not is_safe:
+            logging.warning(f"Security check failed for path: {path}")
+        return is_safe
+    except Exception as e:
+        logging.error(f"Error in security check: {str(e)}")
         return False
 
 if __name__ == "__main__":
