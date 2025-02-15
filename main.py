@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import aiofiles
 import os
 from dotenv import load_dotenv
+import base64
 import openai
 import subprocess
 import json
@@ -11,38 +12,61 @@ from datetime import datetime
 from PIL import Image
 import logging
 import traceback
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
+import requests
+import sqlite3
+import re
+import markdown
+import shutil
+from collections import defaultdict
+import glob
+from openai import OpenAI
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Get the current directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Create necessary directories
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+# Fix: Changed 'ios' to 'os'
+os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "docs"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "logs"), exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
-    filename="logs/app.log",
+    filename=os.path.join(LOGS_DIR, "app.log"),
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
 app = FastAPI()
 
-# Get API keys from environment variables
-AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY")
-openai.api_key = AIPROXY_TOKEN
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Define API key header
-api_key_header = APIKeyHeader(name="X-API-KEY")
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+API_SECRET_KEY = "mysecret123"
 
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def validate_api_key(api_key: str = Security(api_key_header)):
+def validate_api_key(api_key: str = Depends(api_key_header)):
     if api_key != API_SECRET_KEY:
-        logging.warning(f"Invalid API key attempt: {api_key}")
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
@@ -50,141 +74,206 @@ def validate_api_key(api_key: str = Security(api_key_header)):
 def home():
     return {"message": "LLM Automation Agent is running!"}
 
-@app.get("/read")
-async def read_file(path: str, api_key: str = Security(api_key_header)):
-    validate_api_key(api_key)
-    file_path = os.path.join(DATA_DIR, path.lstrip("/"))
-
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    async with aiofiles.open(file_path, "r", encoding="utf-8") as file:
-        content = await file.read()
-
-    return {"filename": path, "content": content}
-
-# Define a Pydantic model for the task input
 class Task(BaseModel):
     task: str
 
 @app.post("/run")
-def run_task(task: Task, api_key: str = Security(api_key_header)):
-    validate_api_key(api_key)
+async def run_task(task: Task, api_key: str = Depends(validate_api_key)):
     logging.info(f"Task received: {task.task}")
-    
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an automation agent that executes tasks."},
-                {"role": "user", "content": task.task}
-            ]
-        )
-        command = response["choices"][0]["message"]["content"]
-        logging.info(f"Interpreted command: {command}")
-        
-        result = execute_task(command)
-        if result["status"] == "success":
-            return JSONResponse(status_code=200, content=result)
-        else:
-            return JSONResponse(status_code=400, content=result)
+        result = execute_task(task.task)
+        logging.info(f"Task execution result: {result}")
+        return JSONResponse(status_code=200, content=result) if result["status"] == "success" else JSONResponse(status_code=400, content=result)
     except Exception as e:
-        logging.error(f"Error executing task: {str(e)}")
-        return JSONResponse(
-            status_code=500, 
-            content={"status": "error", "message": "Internal Server Error"}
-        )
+        error_msg = f"Error executing task: {str(e)}\n{traceback.format_exc()}"
+        logging.error(error_msg)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 def execute_task(command):
     try:
-        if not command or len(command.strip()) == 0:
-            return {"status": "error", "message": "No valid task command provided."}
-
-        if "install uv" in command:
+        # A1: Install uv and run datagen.py
+        if "install uv" in command.lower():
             subprocess.run(["pip", "install", "uv"], check=True)
-            return {"status": "success", "message": "uv installed successfully."}
+            return {"status": "success", "message": "uv installed successfully"}
 
-        elif "format" in command and "prettier" in command:
-            if not os.path.exists(os.path.join(DATA_DIR, "format.md")):
-                return {"status": "error", "message": "format.md file not found!"}
-            subprocess.run(["npx", "prettier", "--write", f"{DATA_DIR}/format.md"], check=True)
-            return {"status": "success", "message": "Markdown formatted successfully."}
+        if "run datagen" in command.lower():
+            email = os.getenv("USER_EMAIL", "test@example.com")
+            subprocess.run(["python", "-m", "pip", "install", "requests"], check=True)
+            response = requests.get("https://raw.githubusercontent.com/sanand0/tools-in-data-science-public/tds-2025-01/project-1/datagen.py")
+            with open("datagen.py", "w") as f:
+                f.write(response.text)
+            subprocess.run(["python", "datagen.py", email], check=True)
+            return {"status": "success", "message": "Data generation completed"}
 
-        elif "count Wednesdays" in command:
-            dates_path = os.path.join(DATA_DIR, "dates.txt")
-            if not os.path.exists(dates_path):
-                return {"status": "error", "message": "dates.txt file not found!"}
-            
-            with open(dates_path, "r") as f:
+        # A2: Format markdown
+        if "format markdown" in command.lower():
+            subprocess.run(["npx", "prettier@3.4.2", "--write", "data/format.md"], check=True)
+            return {"status": "success", "message": "Markdown formatted"}
+
+        # A3: Count wednesdays
+        if "count wednesdays" in command.lower():
+            with open("data/dates.txt", "r") as f:
                 dates = [datetime.strptime(line.strip(), "%Y-%m-%d").weekday() for line in f]
-            wednesday_count = dates.count(2)
-            return {"status": "success", "message": f"Wednesdays count: {wednesday_count}"}
+            wednesdays = sum(1 for d in dates if d == 2)
+            with open("data/dates-wednesdays.txt", "w") as f:
+                f.write(str(wednesdays))
+            return {"status": "success", "message": "Wednesdays counted"}
 
-        elif "sort contacts" in command:
-            contacts_path = os.path.join(DATA_DIR, "contacts.json")
-            if not os.path.exists(contacts_path):
-                return {"status": "error", "message": "contacts.json file not found!"}
+        # A4: Sort contacts
+        if "sort contacts" in command.lower():
+            with open("data/contacts.json", "r") as f:
+                contacts = json.load(f)
+            contacts.sort(key=lambda x: (x["last_name"], x["first_name"]))
+            with open("data/contacts-sorted.json", "w") as f:
+                json.dump(contacts, f, indent=4)
+            return {"status": "success", "message": "Contacts sorted"}
+
+        # A5: Write first line of 10 most recent log files
+        if "log files" in command.lower():
+            log_files = glob.glob(os.path.join(DATA_DIR, "logs", "*.log"))
+            log_files.sort(key=os.path.getmtime, reverse=True)
+            recent_logs = log_files[:10]
             
-            try:
-                with open(contacts_path, "r") as f:
-                    contacts = json.load(f)
-            except json.JSONDecodeError:
-                return {"status": "error", "message": "Invalid JSON in contacts.json"}
-                
-            sorted_contacts = sorted(contacts, key=lambda x: (x["last_name"], x["first_name"]))
-            with open(os.path.join(DATA_DIR, "contacts-sorted.json"), "w") as f:
-                json.dump(sorted_contacts, f, indent=2)
-            return {"status": "success", "message": "Contacts sorted successfully."}
+            first_lines = []
+            for log_file in recent_logs:
+                try:
+                    with open(log_file, 'r') as f:
+                        first_line = f.readline().strip()
+                        first_lines.append(first_line)
+                except Exception as e:
+                    logging.error(f"Error reading log file {log_file}: {str(e)}")
+                    first_lines.append(f"Error reading file: {os.path.basename(log_file)}")
+            
+            with open(os.path.join(DATA_DIR, "logs-recent.txt"), 'w') as f:
+                f.write('\n'.join(first_lines))
+            
+            return {"status": "success", "message": "Recent log first lines extracted"}
 
-        elif "extract first lines of logs" in command:
-            logs_dir = os.path.join(DATA_DIR, "logs")
-            if not os.path.exists(logs_dir):
-                return {"status": "error", "message": "logs directory not found!"}
-                
-            log_files = sorted(os.listdir(logs_dir), 
-                             key=lambda x: os.path.getmtime(os.path.join(logs_dir, x)), 
-                             reverse=True)
-            with open(os.path.join(DATA_DIR, "logs-recent.txt"), "w") as f:
-                for file in log_files[:10]:
-                    with open(os.path.join(logs_dir, file), "r") as log:
-                        f.write(log.readline())
-            return {"status": "success", "message": "Log lines extracted successfully."}
+        # A6: Create docs index.json
+        if "create index" in command.lower():
+            md_files = glob.glob(os.path.join(DATA_DIR, "docs", "**", "*.md"), recursive=True)
+            index = {}
+            
+            for md_file in md_files:
+                try:
+                    with open(md_file, 'r') as f:
+                        content = f.read()
+                        
+                    # Find the first H1 header
+                    h1_match = re.search(r'^# (.+)$', content, re.MULTILINE)
+                    if h1_match:
+                        title = h1_match.group(1).strip()
+                        # Get relative path
+                        rel_path = os.path.relpath(md_file, os.path.join(DATA_DIR, "docs"))
+                        index[rel_path] = title
+                except Exception as e:
+                    logging.error(f"Error processing markdown file {md_file}: {str(e)}")
+            
+            with open(os.path.join(DATA_DIR, "docs", "index.json"), 'w') as f:
+                json.dump(index, f, indent=4)
+            
+            return {"status": "success", "message": "Docs index created"}
 
-        elif "extract email sender" in command:
+        # A7: Extract email sender
+        if "extract email sender" in command.lower():
             with open("data/email.txt", "r") as f:
-                email_text = f.read()
-            sender = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Extract the sender's email from this message."},
-                    {"role": "user", "content": email_text}
-                ]
-            )["choices"][0]["message"]["content"]
+                content = f.read()
+            sender_email = re.search(r"From: .*?<(.*?)>", content).group(1)
             with open("data/email-sender.txt", "w") as f:
-                f.write(sender.strip())
+                f.write(sender_email)
+            return {"status": "success", "message": "Email sender extracted"}
 
-        elif "extract credit card number" in command:
-            image = Image.open("data/credit-card.png")
-            text = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Extract the credit card number from this image."},
-                    {"role": "user", "content": image}
-                ]
-            )["choices"][0]["message"]["content"]
-            with open("data/credit-card.txt", "w") as f:
-                f.write(text.replace(" ", ""))
+        # A8: Extract credit card
+        if "extract credit card" in command.lower():
+            # Load the image
+            image_path = os.path.join(DATA_DIR, "credit-card.png")
+            
+            # Open the image file
+            with open(image_path, "rb") as image_file:
+                # Create a request to OpenAI
+                response = client.chat.completions.create(
+                    model="gpt-4-vision-preview",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Extract the credit card number from this image. Return only the digits without any spaces or formatting."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64.b64encode(image_file.read()).decode('utf-8')}",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    max_tokens=300,
+                )
+            
+            # Extract the card number from the response
+            extracted_text = response.choices[0].message.content.strip()
+            # Remove any non-digit characters
+            card_number = ''.join(filter(str.isdigit, extracted_text))
+            
+            with open(os.path.join(DATA_DIR, "credit-card.txt"), "w") as f:
+                f.write(card_number)
+                
+            return {"status": "success", "message": "Credit card extracted"}
 
-        else:
-            return {"status": "error", "message": "Unsupported command. Please check the input."}
+        # A9: Find similar comments
+        if "find similar comments" in command.lower():
+            with open(os.path.join(DATA_DIR, "comments.txt"), "r") as f:
+                comments = [line.strip() for line in f if line.strip()]
+            
+            # Get embeddings for all comments
+            all_embeddings = []
+            for comment in comments:
+                response = client.embeddings.create(
+                    input=comment,
+                    model="text-embedding-ada-002"
+                )
+                all_embeddings.append(response.data[0].embedding)
+            
+            # Find the most similar pair
+            max_similarity = -1
+            most_similar_pair = (0, 0)
+            
+            for i in range(len(comments)):
+                for j in range(i+1, len(comments)):
+                    # Calculate cosine similarity
+                    similarity = compute_cosine_similarity(all_embeddings[i], all_embeddings[j])
+                    if similarity > max_similarity:
+                        max_similarity = similarity
+                        most_similar_pair = (i, j)
+            
+            # Write the most similar comments to the output file
+            with open(os.path.join(DATA_DIR, "comments-similar.txt"), "w") as f:
+                f.write(f"{comments[most_similar_pair[0]]}\n{comments[most_similar_pair[1]]}")
+            
+            return {"status": "success", "message": "Similar comments found"}
 
+        # A10: Calculate ticket sales
+        if "calculate ticket sales" in command.lower():
+            conn = sqlite3.connect(os.path.join(DATA_DIR, "ticket-sales.db"))
+            cursor = conn.cursor()
+            cursor.execute("SELECT SUM(units * price) FROM tickets WHERE type='Gold'")
+            total_sales = cursor.fetchone()[0] or 0
+            conn.close()
+            with open(os.path.join(DATA_DIR, "ticket-sales-gold.txt"), "w") as f:
+                f.write(str(total_sales))
+            return {"status": "success", "message": "Ticket sales calculated"}
+
+        return {"status": "error", "message": "Unknown task"}
     except Exception as e:
-        error_message = f"Task failed: {str(e)}"
-        logging.error(error_message)
-        traceback.print_exc()
-        return {"status": "error", "message": error_message}
+        logging.error(f"Error executing task: {str(e)}\n{traceback.format_exc()}")
+        return {"status": "error", "message": str(e)}
 
-# Add this at the very end of the file
+def compute_cosine_similarity(v1, v2):
+    """Compute cosine similarity between two vectors"""
+    import numpy as np
+    v1 = np.array(v1)
+    v2 = np.array(v2)
+    return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
-
