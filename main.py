@@ -23,6 +23,14 @@ import shutil
 from collections import defaultdict
 import glob
 from openai import OpenAI
+import git
+from pathlib import Path
+import duckdb
+from bs4 import BeautifulSoup
+import speech_recognition as sr
+from pydub import AudioSegment
+import pandas as pd
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -263,6 +271,139 @@ def execute_task(command):
                 f.write(str(total_sales))
             return {"status": "success", "message": "Ticket sales calculated"}
 
+        # B3: Fetch API data
+        if "fetch api data" in command.lower():
+            if not security_check(os.path.join(DATA_DIR, "api_data.json")):
+                return {"status": "error", "message": "Security check failed"}
+            
+            api_url = command.split("url=")[1].split()[0]
+            response = requests.get(api_url)
+            with open(os.path.join(DATA_DIR, "api_data.json"), "w") as f:
+                json.dump(response.json(), f)
+            return {"status": "success", "message": "API data fetched"}
+
+        # B4: Git operations
+        if "git clone" in command.lower():
+            repo_url = command.split("url=")[1].split()[0]
+            repo_path = os.path.join(DATA_DIR, "repo")
+            if not security_check(repo_path):
+                return {"status": "error", "message": "Security check failed"}
+            
+            if os.path.exists(repo_path):
+                shutil.rmtree(repo_path)
+            git.Repo.clone_from(repo_url, repo_path)
+            return {"status": "success", "message": "Repository cloned"}
+
+        # B5: SQL Query
+        if "run sql" in command.lower():
+            db_path = os.path.join(DATA_DIR, "database.db")
+            if not security_check(db_path):
+                return {"status": "error", "message": "Security check failed"}
+            
+            query = command.split("query=")[1].strip()
+            if "delete" in query.lower():
+                return {"status": "error", "message": "Delete operations not allowed"}
+            
+            conn = duckdb.connect(db_path)
+            result = conn.execute(query).fetchall()
+            conn.close()
+            
+            with open(os.path.join(DATA_DIR, "query_result.json"), "w") as f:
+                json.dump(result, f)
+            return {"status": "success", "message": "Query executed"}
+
+        # B6: Web Scraping
+        if "scrape website" in command.lower():
+            url = command.split("url=")[1].split()[0]
+            response = requests.get(url)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            data = {
+                "title": soup.title.string if soup.title else "",
+                "text": soup.get_text()
+            }
+            
+            output_path = os.path.join(DATA_DIR, "scraped_data.json")
+            if not security_check(output_path):
+                return {"status": "error", "message": "Security check failed"}
+            
+            with open(output_path, "w") as f:
+                json.dump(data, f)
+            return {"status": "success", "message": "Website scraped"}
+
+        # B7: Image Processing
+        if "process image" in command.lower():
+            input_path = os.path.join(DATA_DIR, "input_image.jpg")
+            output_path = os.path.join(DATA_DIR, "processed_image.jpg")
+            
+            if not all(security_check(p) for p in [input_path, output_path]):
+                return {"status": "error", "message": "Security check failed"}
+            
+            with Image.open(input_path) as img:
+                # Resize to 50% of original size
+                new_size = tuple(dim // 2 for dim in img.size)
+                resized_img = img.resize(new_size)
+                resized_img.save(output_path, quality=85)
+            
+            return {"status": "success", "message": "Image processed"}
+
+        # B8: Audio Transcription
+        if "transcribe audio" in command.lower():
+            input_path = os.path.join(DATA_DIR, "input.mp3")
+            output_path = os.path.join(DATA_DIR, "transcription.txt")
+            
+            if not all(security_check(p) for p in [input_path, output_path]):
+                return {"status": "error", "message": "Security check failed"}
+            
+            # Convert MP3 to WAV
+            audio = AudioSegment.from_mp3(input_path)
+            wav_path = os.path.join(DATA_DIR, "temp.wav")
+            audio.export(wav_path, format="wav")
+            
+            # Transcribe
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data)
+            
+            with open(output_path, "w") as f:
+                f.write(text)
+            
+            os.remove(wav_path)  # Clean up temp file
+            return {"status": "success", "message": "Audio transcribed"}
+
+        # B9: Markdown to HTML
+        if "convert markdown" in command.lower():
+            input_path = os.path.join(DATA_DIR, "input.md")
+            output_path = os.path.join(DATA_DIR, "output.html")
+            
+            if not all(security_check(p) for p in [input_path, output_path]):
+                return {"status": "error", "message": "Security check failed"}
+            
+            with open(input_path, "r") as f:
+                md_content = f.read()
+            
+            html_content = markdown.markdown(md_content)
+            
+            with open(output_path, "w") as f:
+                f.write(html_content)
+            
+            return {"status": "success", "message": "Markdown converted"}
+
+        # B10: CSV Filter API
+        if "create csv filter" in command.lower():
+            csv_path = os.path.join(DATA_DIR, "data.csv")
+            if not security_check(csv_path):
+                return {"status": "error", "message": "Security check failed"}
+            
+            @app.get("/filter")
+            async def filter_csv(column: str, value: str):
+                df = pd.read_csv(csv_path)
+                filtered_df = df[df[column] == value]
+                return JSONResponse(content=filtered_df.to_dict(orient="records"))
+            
+            return {"status": "success", "message": "CSV filter endpoint created"}
+
         return {"status": "error", "message": "Unknown task"}
     except Exception as e:
         logging.error(f"Error executing task: {str(e)}\n{traceback.format_exc()}")
@@ -274,6 +415,15 @@ def compute_cosine_similarity(v1, v2):
     v1 = np.array(v1)
     v2 = np.array(v2)
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+
+def security_check(path: str) -> bool:
+    """Ensure path is within /data directory"""
+    try:
+        real_path = os.path.realpath(path)
+        data_dir = os.path.realpath(DATA_DIR)
+        return real_path.startswith(data_dir)
+    except:
+        return False
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
